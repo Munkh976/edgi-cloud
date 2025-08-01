@@ -13,7 +13,7 @@ primary_region = 'ord'
   PORT = '8001'
 
 [[mounts]]
-  source = 'datasette'
+  source = 'edgi-cloud'
   destination = '/data'
 
 [http_service]

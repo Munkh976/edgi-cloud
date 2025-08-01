@@ -48,8 +48,7 @@
                 {% endif %}
 
                 <form action="/create-database" method="post">
-                    <input type="hidden" name="csrftoken" value="{{ csrftoken() }}">
-                    
+                    <!-- REMOVED: CSRF token line -->                    
                     <div class="mb-6">
                         <label class="block text-text mb-2 font-medium">Database Name:</label>
                         <div class="relative">
