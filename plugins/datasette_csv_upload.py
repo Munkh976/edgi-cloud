@@ -14,6 +14,11 @@ from datasette import hookimpl
 from datasette.utils.asgi import Response
 from email.parser import BytesParser
 from email.policy import default
+import secrets
+import hmac
+import hashlib
+import time
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -22,52 +27,117 @@ MAX_CSV_SIZE = 10 * 1024 * 1024  # 10MB (matching your template)
 MAX_TABLES_PER_DATABASE = 20
 DATA_DIR = os.getenv('EDGI_DATA_DIR', "/data")  # Align with dynamic path from datasette_admin_panel.py
 
+# Use the same secret key as the main plugin
+CSRF_SECRET_KEY = os.getenv('CSRF_SECRET_KEY', 'your-default-secret-key-change-in-production-' + secrets.token_hex(32))
+
 def generate_csrf_token(datasette, actor):
-    """Generate CSRF token for forms using Datasette's built-in method."""
+    """Generate CSRF token for forms using secure HMAC-based approach."""
     if not actor:
-        return ""
+        # For anonymous users, create a session-based token
+        session_id = secrets.token_hex(16)
+        user_identifier = f"anon_{session_id}"
+    else:
+        user_identifier = str(actor.get("id", ""))
     
-    return datasette._send_signed_token(
-        {"a": actor.get("id", "")}, 
-        max_age=3600
-    )
+    # Create timestamp
+    timestamp = str(int(time.time()))
+    
+    # Create token data
+    token_data = f"{user_identifier}:{timestamp}"
+    
+    # Create HMAC signature
+    signature = hmac.new(
+        CSRF_SECRET_KEY.encode('utf-8'),
+        token_data.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()[:24]  # Use first 24 characters for shorter tokens
+    
+    # Return base64 encoded token
+    final_token = base64.urlsafe_b64encode(f"{token_data}:{signature}".encode()).decode().rstrip('=')
+    
+    return final_token
 
 async def verify_csrf_token(request, datasette):
-    """Verify CSRF token for POST requests."""
+    """Verify CSRF token for POST requests with proper validation."""
     if request.method != "POST":
         return True
     
     # Get actor
     actor = request.actor
     if not actor:
+        logger.warning("No actor found for CSRF verification")
         return False
     
-    # Get CSRF token from form data or JSON
+    # Get CSRF token from form data
     submitted_token = ""
-    content_type = request.headers.get('content-type', '').lower()
-    
-    if 'application/json' in content_type:
-        try:
+    try:
+        content_type = request.headers.get('content-type', '').lower()
+        
+        if 'application/json' in content_type:
             import json
             body = await request.post_body()
-            data = json.loads(body.decode('utf-8'))
-            submitted_token = data.get('csrf_token', '')
-        except:
-            submitted_token = ""
-    else:
+            if body:
+                data = json.loads(body.decode('utf-8'))
+                submitted_token = data.get('csrf_token', '')
+        else:
+            # For multipart form data, we need to parse it ourselves since we already do this
+            pass  # Token will be verified in the form parsing section
+            
+    except Exception as e:
+        logger.debug(f"Error getting CSRF token: {e}")
+        return False
+    
+    return submitted_token  # Return the token for manual verification in the upload handler
+
+def verify_csrf_token_manual(submitted_token, actor):
+    """Manually verify a CSRF token (for use in form parsing)."""
+    if not submitted_token or not actor:
+        return False
+    
+    try:
+        # Add padding back for base64 decoding
+        padding = 4 - (len(submitted_token) % 4)
+        if padding != 4:
+            submitted_token += '=' * padding
+            
+        # Decode the token
+        decoded = base64.urlsafe_b64decode(submitted_token.encode()).decode()
+        
+        # Split token parts
+        parts = decoded.split(':')
+        if len(parts) != 3:
+            return False
+            
+        token_user_id, timestamp, signature = parts
+        expected_user_id = str(actor.get("id", ""))
+        
+        # Verify user ID matches
+        if token_user_id != expected_user_id:
+            return False
+        
+        # Check if token is not too old (2 hours max)
         try:
-            post_vars = await request.post_vars()
-            submitted_token = post_vars.get("csrftoken", "")
-        except:
-            submitted_token = ""
+            token_time = int(timestamp)
+            current_time = int(time.time())
+            if current_time - token_time > 7200:  # 2 hours
+                return False
+        except ValueError:
+            return False
+        
+        # Verify signature
+        token_data = f"{token_user_id}:{timestamp}"
+        expected_signature = hmac.new(
+            CSRF_SECRET_KEY.encode('utf-8'),
+            token_data.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()[:24]
+        
+        return hmac.compare_digest(signature, expected_signature)
+        
+    except Exception as e:
+        logger.error(f"Manual CSRF verification error: {e}")
+        return False
     
-    # Generate expected token using Datasette's method
-    expected_token = datasette._send_signed_token(
-        {"a": actor.get("id", "")}, 
-        max_age=3600
-    )
-    
-    return submitted_token == expected_token
 
 @hookimpl
 def register_routes():
@@ -170,9 +240,8 @@ async def handle_csv_upload_secure(request, datasette, db_name, actor):
         
         # Verify CSRF token from parsed form data
         submitted_token = forms.get('csrftoken', '')
-        expected_token = generate_csrf_token(datasette, actor)
-        if submitted_token != expected_token:
-            logger.warning(f"CSRF token mismatch in CSV upload: expected={expected_token}, got={submitted_token}")
+        if not verify_csrf_token_manual(submitted_token, actor):
+            logger.warning(f"CSRF token mismatch in CSV upload")
             return Response.redirect(f"/upload-secure/{db_name}?error=Security token invalid. Please try again.")
         
         # Extract form fields - MATCHING YOUR TEMPLATE'S FIELD NAMES

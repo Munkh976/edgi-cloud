@@ -16,6 +16,11 @@ import os
 import base64
 from email.parser import BytesParser
 from email.policy import default
+import secrets
+import hmac
+import hashlib
+import time
+
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -109,40 +114,132 @@ def set_actor_cookie(response, datasette, actor_data):
         logger.error(f"Error setting cookie: {e}")
         response.set_cookie("ds_actor", f"user_{actor_data.get('id', '')}", httponly=True, max_age=3600, samesite="lax")
 
+# Add this constant at the top with other constants
+CSRF_SECRET_KEY = os.getenv('CSRF_SECRET_KEY', 'your-default-secret-key-change-in-production-' + secrets.token_hex(32))
+
+def generate_csrf_token(datasette, actor):
+    """Generate CSRF token for forms using secure HMAC-based approach."""
+    if not actor:
+        # For anonymous users, create a session-based token
+        session_id = secrets.token_hex(16)
+        user_identifier = f"anon_{session_id}"
+    else:
+        user_identifier = str(actor.get("id", ""))
+    
+    # Create timestamp
+    timestamp = str(int(time.time()))
+    
+    # Create token data
+    token_data = f"{user_identifier}:{timestamp}"
+    
+    # Create HMAC signature
+    signature = hmac.new(
+        CSRF_SECRET_KEY.encode('utf-8'),
+        token_data.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()[:24]  # Use first 24 characters for shorter tokens
+    
+    # Return base64 encoded token
+    final_token = base64.urlsafe_b64encode(f"{token_data}:{signature}".encode()).decode().rstrip('=')
+    
+    return final_token
+
 async def verify_csrf_token(request, datasette):
-    """Verify CSRF token for POST requests."""
+    """Verify CSRF token for POST requests with proper validation."""
     if request.method != "POST":
         return True
     
-    # Get CSRF token from form data
-    try:
-        post_vars = await request.post_vars()
-        submitted_token = post_vars.get("csrftoken", "")
-    except:
-        submitted_token = ""
-    
-    # Generate expected token using Datasette's method
+    # Get actor
     actor = get_actor_from_request(request)
-    if not actor:
+    
+    # Get CSRF token from form data or JSON
+    submitted_token = ""
+    content_type = request.headers.get('content-type', '').lower()
+    
+    if 'application/json' in content_type:
+        try:
+            import json
+            body = await request.post_body()
+            if body:
+                data = json.loads(body.decode('utf-8'))
+                submitted_token = data.get('csrf_token', '')
+        except Exception as e:
+            logger.debug(f"Error parsing JSON for CSRF token: {e}")
+            return False
+    else:
+        try:
+            post_vars = await request.post_vars()
+            submitted_token = post_vars.get("csrftoken", "")
+        except Exception as e:
+            logger.debug(f"Error getting POST vars for CSRF token: {e}")
+            return False
+    
+    if not submitted_token:
+        logger.warning("No CSRF token submitted")
         return False
     
-    # Use Datasette's CSRF token generation
-    expected_token = datasette._send_signed_token(
-        {"a": actor.get("id", "")}, 
-        max_age=3600
-    )
-    
-    return submitted_token == expected_token
+    try:
+        # Add padding back for base64 decoding
+        padding = 4 - (len(submitted_token) % 4)
+        if padding != 4:
+            submitted_token += '=' * padding
+            
+        # Decode the token
+        decoded = base64.urlsafe_b64decode(submitted_token.encode()).decode()
+        
+        # Split token parts
+        parts = decoded.split(':')
+        if len(parts) != 3:
+            logger.warning(f"Invalid CSRF token format: expected 3 parts, got {len(parts)}")
+            return False
+            
+        token_user_id, timestamp, signature = parts
+        
+        # Determine expected user identifier
+        if actor:
+            expected_user_id = str(actor.get("id", ""))
+        else:
+            # For anonymous users, we can't verify the session ID, so allow any anon_ prefix
+            if not token_user_id.startswith("anon_"):
+                logger.warning("Anonymous user with non-anonymous token")
+                return False
+            expected_user_id = token_user_id  # Use the token's user ID for anonymous users
+        
+        # Verify user ID matches (for authenticated users)
+        if actor and token_user_id != expected_user_id:
+            logger.warning(f"CSRF token user ID mismatch: token={token_user_id}, expected={expected_user_id}")
+            return False
+        
+        # Check if token is not too old (2 hours max for better UX)
+        try:
+            token_time = int(timestamp)
+            current_time = int(time.time())
+            if current_time - token_time > 7200:  # 2 hours
+                logger.warning(f"CSRF token expired: age={(current_time - token_time)/3600:.1f} hours")
+                return False
+        except ValueError:
+            logger.warning("Invalid timestamp in CSRF token")
+            return False
+        
+        # Verify signature
+        token_data = f"{token_user_id}:{timestamp}"
+        expected_signature = hmac.new(
+            CSRF_SECRET_KEY.encode('utf-8'),
+            token_data.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()[:24]
+        
+        if not hmac.compare_digest(signature, expected_signature):
+            logger.warning("CSRF token signature verification failed")
+            return False
+        
+        logger.debug("CSRF token verified successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"CSRF token verification error: {e}")
+        return False
 
-def generate_csrf_token(datasette, actor):
-    """Generate CSRF token for forms."""
-    if not actor:
-        return ""
-    
-    return datasette._send_signed_token(
-        {"a": actor.get("id", "")}, 
-        max_age=3600
-    )
 
 async def csrf_protect(func):
     """Decorator to add CSRF protection to views."""
@@ -2180,6 +2277,63 @@ async def user_owns_database(datasette, user_id, db_name):
     except Exception as e:
         logger.error(f"Database ownership check failed: {e}")
         return False
+
+@hookimpl
+def extra_template_vars(datasette, request):
+    """Add CSRF token to all templates."""
+    actor = get_actor_from_request(request)
+    csrf_token = generate_csrf_token(datasette, actor)
+    return {
+        "csrf_token": csrf_token,
+        "csrftoken": lambda: csrf_token  # Function version for compatibility
+    }
+
+
+
+@hookimpl
+def asgi_wrapper(datasette):
+    """Disable Datasette's built-in CSRF but keep our custom CSRF protection."""
+    def wrap_app(app):
+        async def csrf_custom_app(scope, receive, send):
+            # Only bypass Datasette's CSRF, our custom CSRF still works
+            if scope.get("type") == "http" and scope.get("method") == "POST":
+                path = scope.get("path", "")
+                
+                # List our custom routes that use our CSRF system instead of Datasette's
+                our_routes = [
+                    "/login", 
+                    "/register", 
+                    "/create-database",
+                    "/change-password",
+                    "/delete-table-ajax"
+                ]
+                
+                # Also bypass for paths starting with these prefixes
+                our_prefixes = [
+                    "/upload-secure/",
+                    "/db/",
+                    "/delete-table/",
+                    "/edit-content/"
+                ]
+                
+                is_our_route = (
+                    path in our_routes or 
+                    any(path.startswith(prefix) for prefix in our_prefixes)
+                )
+                
+                if is_our_route:
+                    # Remove Datasette's CSRF headers but keep our custom ones
+                    headers = scope.get("headers", [])
+                    filtered_headers = []
+                    for name, value in headers:
+                        # Only remove Datasette's specific CSRF headers
+                        if name.lower() not in [b"x-csrftoken"]:
+                            filtered_headers.append((name, value))
+                    scope["headers"] = filtered_headers
+            
+            return await app(scope, receive, send)
+        return csrf_custom_app
+    return wrap_app
 
 @hookimpl
 def register_routes():

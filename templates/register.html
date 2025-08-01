@@ -57,6 +57,15 @@
                 <form action="/register" method="post">
                     <input type="hidden" name="csrftoken" value="{{ csrf_token }}">
                     
+                    <!-- Rest of the form stays the same -->
+                    <div class="mb-4">
+                        <label for="username" class="block text-text mb-2 font-medium">Username:</label>
+                        <div class="relative">
+                            <input type="text" id="username" name="username" class="w-full p-3 pl-10 border rounded-button focus:outline-none focus:ring-2 focus:ring-accent" required>
+                            <i class="ri-user-line absolute left-3 top-3 text-textlight"></i>
+                        </div>
+                    </div>
+                    
                     <div class="mb-4">
                         <label for="username" class="block text-text mb-2 font-medium">Username:</label>
                         <div class="relative">

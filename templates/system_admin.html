@@ -11,6 +11,9 @@
     <link rel="icon" href="/static/favicon.ico">
 </head>
 <body class="bg-background">
+    <!-- Hidden CSRF token for AJAX requests -->
+    <input type="hidden" name="csrftoken" value="{{ csrf_token }}" style="display: none;">
+    
     <header class="fixed top-0 left-0 right-0 z-50 bg-header text-white shadow-md">
         <div class="container mx-auto px-4 h-20 flex items-center justify-between">
             <div class="flex items-center">
@@ -28,7 +31,7 @@
                     <a href="/logout" class="text-white hover:text-accent">Logout</a>
                 </div>
             {% endif %}
-        </div>
+        </div> 
     </header>
     
     <main class="flex-grow pt-20 pb-6">
@@ -156,7 +159,8 @@
                                                 <i class="ri-edit-line mr-1"></i>Edit
                                             </button>
                                             {% if user.username != actor.username %}
-                                                <button class="text-red-500 hover:text-red-700 text-sm">
+                                                <button class="text-red-500 hover:text-red-700 text-sm" 
+                                                        onclick="deleteUser('{{ user.user_id }}', '{{ user.username }}')">
                                                     <i class="ri-delete-bin-line mr-1"></i>Delete
                                                 </button>
                                             {% endif %}
@@ -220,7 +224,8 @@
                                             <a href="/edit-content/{{ db.db_id }}" class="text-accent hover:text-primary text-sm mr-3">
                                                 <i class="ri-edit-line mr-1"></i>Edit
                                             </a>
-                                            <button class="text-red-500 hover:text-red-700 text-sm">
+                                            <button class="text-red-500 hover:text-red-700 text-sm"
+                                                    onclick="deleteDatabase('{{ db.db_id }}', '{{ db.db_name }}')">
                                                 <i class="ri-delete-bin-line mr-1"></i>Delete
                                             </button>
                                         </td>
@@ -279,7 +284,7 @@
 
     <footer class="bg-gray-50 border-t border-gray-100 py-8">
         <div class="container mx-auto px-4">
-                        <div class="flex flex-col md:flex-row justify-between items-center">
+            <div class="flex flex-col md:flex-row justify-between items-center">
                 <div class="flex items-center mb-4 md:mb-0">
                     <div class="w-8 h-8 flex items-center justify-center mr-2">
                         <i class="ri-earth-line text-primary ri-lg" aria-hidden="true"></i>
@@ -317,6 +322,63 @@
             const activeTab = document.getElementById(tabName + '-tab');
             activeTab.classList.add('active', 'text-accent', 'border-accent');
             activeTab.classList.remove('text-textlight');
+        }
+
+        // CSRF-protected admin actions
+        async function deleteUser(userId, username) {
+            if (!confirm(`Are you sure you want to delete user "${username}"? This action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/admin/delete-user', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        user_id: userId,
+                        csrf_token: document.querySelector('[name="csrftoken"]').value
+                    })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (error) {
+                alert('Error deleting user: ' + error.message);
+            }
+        }
+
+        async function deleteDatabase(dbId, dbName) {
+            if (!confirm(`Are you sure you want to delete database "${dbName}"? This action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/admin/delete-database', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        db_id: dbId,
+                        csrf_token: document.querySelector('[name="csrftoken"]').value
+                    })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (error) {
+                alert('Error deleting database: ' + error.message);
+            }
         }
 
         // Initialize with users tab active

@@ -11,7 +11,7 @@
     <link rel="icon" href="/static/favicon.ico">
 </head>
 <body class="bg-background">
-    <!-- Hidden CSRF token for AJAX requests -->
+    <!-- CSRF token for AJAX requests -->
     <input type="hidden" name="csrftoken" value="{{ csrf_token }}" style="display: none;">
     
     <header class="fixed top-0 left-0 right-0 z-50 bg-header text-white shadow-md">
@@ -306,6 +306,7 @@
             if (!confirm(`Are you sure you want to delete the table "${tableName}"? This action cannot be undone.`)) {
                 return;
             }
+            
             // Show loading state
             const originalContent = element.innerHTML;
             element.innerHTML = '<i class="ri-loader-line animate-spin mr-1"></i>Deleting...';
@@ -347,6 +348,7 @@
                 showMessage('Error deleting table: ' + error.message, 'error');
             }
         }
+        
         // Helper function to show messages
         function showMessage(message, type) {
             const messageDiv = document.createElement('div');
@@ -371,7 +373,6 @@
                 }
             }, 5000);
         }
-
     </script>
 </body>
 </html>
